@@ -8,10 +8,9 @@ API_TOKEN = os.environ.get("GIFT_SATELLITE_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Глобальное состояние
-# Важно: если эти названия выдают ошибку 400, поменяй их прямо в ТГ через /del_coll и /add_coll
+# Глобальное состояние (Названия коллекций сразу правильные!)
 state = {
-    "collections": ["PlushPepe", "Dogs"], 
+    "collections": ["Plush Pepe", "Dog"], 
     "min_spread": float(os.environ.get("MIN_SPREAD_PCT", 0.05)), 
     "last_update_id": 0
 }
@@ -126,7 +125,7 @@ async def fetch_models_floor(session, market, coll):
                 print(f"✅ {market}: Собраны цены по коллекции '{coll}'.")
                             
             elif r.status == 429:
-                print(f"⚠️ {market} выдал 429 (Rate Limit). Нужно увеличить паузы.")
+                print(f"⚠️ {market} выдал 429 (Rate Limit).")
             else:
                 error_text = await r.text()
                 print(f"❌ {market} вернул {r.status} для '{coll}'. Причина: {error_text}")
@@ -155,15 +154,15 @@ async def scanner_loop(session):
         for coll in state["collections"]:
             print(f"\n🔄 Начинаем срез по {coll}...")
             
-            # ЗАПРАШИВАЕМ СТРОГО ПО ОЧЕРЕДИ С ПАУЗАМИ
+            # ЗАПРАШИВАЕМ СТРОГО ПО ОЧЕРЕДИ С УВЕЛИЧЕННЫМИ ПАУЗАМИ (защита от 429)
             tg_f = await fetch_models_floor(session, "tg", coll)
-            await asyncio.sleep(3.5) # TG требует 1 запрос в 3 секунды
+            await asyncio.sleep(4.5) # TG лимит: 3 сек + 1.5 сек запаса
             
             mrkt_f = await fetch_models_floor(session, "mrkt", coll)
-            await asyncio.sleep(2.5) # Mrkt требует 1 запрос в 2 секунды
+            await asyncio.sleep(3.5) # Mrkt лимит: 2 сек + 1.5 сек запаса
             
             port_f = await fetch_models_floor(session, "portals", coll)
-            await asyncio.sleep(2.5) # Portals требует 1 запрос в 2 секунды
+            await asyncio.sleep(3.5) # Portals лимит: 2 сек + 1.5 сек запаса
 
             all_models = set(tg_f.keys()) | set(mrkt_f.keys()) | set(port_f.keys())
 
@@ -213,4 +212,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-            
