@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import os
+import time
 from aiohttp import web
 
 # ================= НАСТРОЙКИ (Environment Variables) =================
@@ -12,14 +13,15 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 state = {
     "collections": ["Plush Pepe", "Dog"], 
     "min_spread": float(os.environ.get("MIN_SPREAD_PCT", 0.05)), 
-    "last_update_id": 0
+    "last_update_id": 0,
+    "alerts": {}  # Вечный антиспам-кэш
 }
 
 BASE_URL = "https://gift-satellite.dev/api"
 
 # --- 1. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check) ---
 async def handle_ping(request):
-    return web.Response(text="Arbitrage Bot is active")
+    return web.Response(text="Arbitrage Bot is active and quiet")
 
 async def start_web_server():
     app = web.Application()
@@ -59,8 +61,10 @@ async def check_commands(session):
                 if text == "/start" or text == "/help" or text == "/status":
                     resp = (f"🚀 <b>Сканнер арбитража активен</b>\n\n"
                             f"📦 <b>Коллекции:</b> {', '.join(state['collections'])}\n"
-                            f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n\n"
+                            f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n"
+                            f"🛡 <b>Антиспам:</b> Вечный замок (сигнал только при падении цены)\n\n"
                             f"🛠 <b>Команды:</b>\n"
+                            f"• <code>/status</code> — Показать этот статус\n"
                             f"• <code>/add_coll Название</code> — Добавить коллекцию\n"
                             f"• <code>/del_coll Название</code> — Удалить коллекцию\n"
                             f"• <code>/set_spread 5</code> — Изменить минимальный спред (в %)")
@@ -89,7 +93,6 @@ async def check_commands(session):
 
 # --- 3. СКАНЕР МОДЕЛЕЙ ---
 async def fetch_models_floor(session, market, coll):
-    # Добавлен ?limit=1000 для обхода пагинации сервера!
     url = f"{BASE_URL}/search/{market}/{coll}?limit=1000"
     headers = {"Authorization": f"Token {API_TOKEN}"}
     model_floors = {}
@@ -98,29 +101,22 @@ async def fetch_models_floor(session, market, coll):
         async with session.get(url, headers=headers, timeout=15) as r:
             if r.status == 200:
                 raw_data = await r.json()
-                
                 items = raw_data
                 if isinstance(raw_data, dict):
                     items = raw_data.get("data") or raw_data.get("items") or raw_data.get("result") or []
                 
-                if not isinstance(items, list):
-                    return {}
+                if not isinstance(items, list): return {}
 
                 for i in items:
                     raw_model = i.get("modelName")
                     price = float(i.get("normalizedPrice", 0))
                     
                     if raw_model and price > 0:
-                        # Очищаем от лишних пробелов по краям, чтобы названия всегда совпадали
                         model = str(raw_model).strip()
                         if model not in model_floors or price < model_floors[model]:
                             model_floors[model] = price
-                            
-            elif r.status == 429:
-                print(f"⚠️ {market} выдал 429 (Rate Limit).")
             else:
-                error_text = await r.text()
-                print(f"❌ {market} вернул {r.status} для '{coll}'. Причина: {error_text}")
+                print(f"❌ {market} вернул {r.status} для '{coll}'")
                 
     except Exception as e:
         print(f"❌ Ошибка запроса к {market}: {e}")
@@ -141,7 +137,7 @@ async def scanner_loop(session):
             continue
             
         for coll in state["collections"]:
-            print(f"\n🔄 Начинаем срез по {coll}...")
+            print(f"🔄 Срез по {coll}...")
             
             tg_f = await fetch_models_floor(session, "tg", coll)
             await asyncio.sleep(4.5) 
@@ -163,8 +159,7 @@ async def scanner_loop(session):
                 
                 valid = {m: p for m, p in prices.items() if p < 999999}
                 
-                # ЖЕСТКИЙ ФИЛЬТР ЛИКВИДНОСТИ:
-                # Если модели нет хотя бы на одной из трех площадок, отбрасываем!
+                # ЖЕСТКИЙ ФИЛЬТР ЛИКВИДНОСТИ: Наличие на всех 3 рынках
                 if len(valid) < 3: 
                     continue
 
@@ -176,9 +171,18 @@ async def scanner_loop(session):
                 best_sell_p = others[best_sell_m] 
 
                 if buy_p <= best_sell_p * (1 - state["min_spread"]):
+                    
+                    # ======= ВЕЧНЫЙ АНТИСПАМ =======
+                    alert_key = f"{coll}_{model}"
+                    if alert_key in state["alerts"]:
+                        last_alert = state["alerts"][alert_key]
+                        # Пропускаем, если цена НЕ стала ниже (выгоднее)
+                        if buy_p >= last_alert["buy_price"]:
+                            continue 
+                    # ===============================
+
                     profit = ((best_sell_p - buy_p) / buy_p) * 100
                     
-                    # Формируем красивую строку для двух рынков продажи
                     sell_info = [f"{m}: {p} TON" for m, p in others.items()]
                     sell_text = " | ".join(sell_info)
 
@@ -188,7 +192,10 @@ async def scanner_loop(session):
                            f"💰 ПРОДАТЬ: {sell_text}")
                     
                     await send_tg(session, msg)
-                    print(f"💸 Найдена связка! {model}. Профит: {profit:.1f}%")
+                    print(f"💸 Сигнал по {model} отправлен!")
+                    
+                    # Обновляем кэш последней отправленной цены
+                    state["alerts"][alert_key] = {"buy_price": buy_p}
 
         print("💤 Круг завершен, ждем 15 сек...")
         await asyncio.sleep(15)
@@ -206,4 +213,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-        
