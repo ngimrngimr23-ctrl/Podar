@@ -15,7 +15,7 @@ state = {
     "last_update_id": 0
 }
 
-BASE_URL = "https://api.gift-satellite.dev"
+BASE_URL = "https://gift-satellite.dev/api"
 
 # --- 1. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check) ---
 async def handle_ping(request):
