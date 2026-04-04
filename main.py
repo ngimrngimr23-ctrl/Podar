@@ -9,10 +9,11 @@ API_TOKEN = os.environ.get("GIFT_SATELLITE_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Глобальное состояние
+# Глобальное состояние (управление через ТГ)
 state = {
     "collection": os.environ.get("COLLECTION", "PlushPepe"),
-    "target_backgrounds": [],  # Список фонов для фильтрации
+    "target_models": [],      # Пусто = все модели
+    "target_backgrounds": [],   # Пусто = все фоны
     "min_spread": float(os.environ.get("MIN_SPREAD_PCT", 0.10)),
     "last_update_id": 0
 }
@@ -20,13 +21,10 @@ state = {
 BASE_URL = "https://api.gift-satellite.dev"
 
 # --- ВЕБ-СЕРВЕР ДЛЯ UPTIMEROBOT ---
-
 async def handle_ping(request):
-    """Ответ для UptimeRobot, чтобы сервис не 'засыпал'"""
-    return web.Response(text="Arbitrage Bot is Active")
+    return web.Response(text="Scanner is active")
 
 async def start_web_server():
-    """Запуск веб-сервера на порту Render"""
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -34,165 +32,133 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"🌐 Веб-сервер запущен на порту {port}")
 
-# --- РАБОТА С TELEGRAM ---
-
+# --- ТЕЛЕГРАМ ЛОГИКА ---
 async def send_tg(session, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID, 
-        "text": text, 
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    try:
-        async with session.post(url, json=payload) as r:
-            return await r.json()
-    except Exception as e:
-        print(f"❌ Ошибка отправки в TG: {e}")
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    async with session.post(url, json=payload) as r:
+        return await r.json()
 
 async def check_commands(session):
-    """Обработка команд управления через чат бота"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    params = {"offset": state["last_update_id"] + 1, "timeout": 2}
+    params = {"offset": state["last_update_id"] + 1, "timeout": 1}
     
     try:
         async with session.get(url, params=params) as r:
             data = await r.json()
-            if not data.get("ok"): return
-
             for update in data.get("result", []):
                 state["last_update_id"] = update["update_id"]
                 msg = update.get("message", {})
                 text = msg.get("text", "")
-                user_id = str(msg.get("from", {}).get("id", ""))
-                
-                # Логируем входящие сообщения для отладки
-                print(f"📩 Входящее сообщение от ID {user_id}: {text}")
+                uid = str(msg.get("from", {}).get("id", ""))
 
-                if user_id != TELEGRAM_CHAT_ID:
-                    print(f"⚠️ Игнорирую ID {user_id}. В настройках указан {TELEGRAM_CHAT_ID}")
-                    continue
+                if uid != TELEGRAM_CHAT_ID: continue
 
-                if text == "/start" or text == "/help":
-                    menu = (
-                        f"🤖 <b>Бот-арбитражник запущен!</b>\n\n"
-                        f"<b>Текущие настройки:</b>\n"
-                        f"📦 Коллекция: <code>{state['collection']}</code>\n"
-                        f"📈 Мин. спред: <b>{state['min_spread']*100}%</b>\n"
-                        f"🖼 Фоны: <b>{', '.join(state['target_backgrounds']) if state['target_backgrounds'] else 'Все'}</b>\n\n"
-                        f"<b>Доступные команды:</b>\n"
-                        f"• /status — Проверить работу и настройки\n"
-                        f"• <code>/set_bg Forest, Ocean</code> — Искать только эти фоны\n"
-                        f"• <code>/clear_bg</code> — Сбросить фильтр фонов\n"
-                    )
-                    await send_tg(session, menu)
+                # Команда /start или /status
+                if text == "/start" or text == "/status":
+                    m_list = ", ".join(state['target_models']) if state['target_models'] else "Все"
+                    bg_list = ", ".join(state['target_backgrounds']) if state['target_backgrounds'] else "Все"
+                    resp = (f"⚙️ <b>Настройки сканера:</b>\n\n"
+                            f"📦 Коллекция: <code>{state['collection']}</code>\n"
+                            f"🎭 Модели: <code>{m_list}</code>\n"
+                            f"🖼 Фоны: <code>{bg_list}</code>\n"
+                            f"📈 Спред: <b>{state['min_spread']*100}%</b>\n\n"
+                            f"<b>Команды управления:</b>\n"
+                            f"• <code>/set_coll Name</code> — сменить коллекцию\n"
+                            f"• <code>/set_models M1, M2</code> — фильтр моделей\n"
+                            f"• <code>/clear_models</code> — искать все модели\n"
+                            f"• <code>/set_spread 15</code> — спред 15%\n"
+                            f"• <code>/set_bg B1, B2</code> — фильтр фонов\n"
+                            f"• <code>/clear_bg</code> — искать все фоны")
+                    await send_tg(session, resp)
 
-                elif text == "/status":
-                    await send_tg(session, f"✅ Бот онлайн. Мониторю коллекцию <b>{state['collection']}</b>...")
+                elif text.startswith("/set_coll"):
+                    new_coll = text.replace("/set_coll", "").strip()
+                    if new_coll:
+                        state["collection"] = new_coll
+                        await send_tg(session, f"✅ Коллекция изменена на: <b>{new_coll}</b>")
+
+                elif text.startswith("/set_models"):
+                    models = [m.strip() for m in text.replace("/set_models", "").split(",") if m.strip()]
+                    state["target_models"] = models
+                    await send_tg(session, f"✅ Модели установлены: {', '.join(models)}")
+
+                elif text == "/clear_models":
+                    state["target_models"] = []
+                    await send_tg(session, "✅ Теперь ищем <b>все модели</b> в коллекции.")
+
+                elif text.startswith("/set_spread"):
+                    try:
+                        val = float(text.split()[1]) / 100
+                        state["min_spread"] = val
+                        await send_tg(session, f"✅ Спред изменен на <b>{val*100}%</b>")
+                    except: pass
 
                 elif text.startswith("/set_bg"):
                     bgs = [b.strip() for b in text.replace("/set_bg", "").split(",") if b.strip()]
-                    if bgs:
-                        state["target_backgrounds"] = bgs
-                        await send_tg(session, f"✅ Теперь ищем только фоны: <b>{', '.join(bgs)}</b>")
-                    else:
-                        await send_tg(session, "❌ Ошибка. Напишите: <code>/set_bg НазваниеФона</code>")
-                
+                    state["target_backgrounds"] = bgs
+                    await send_tg(session, f"✅ Фоны установлены: {', '.join(bgs)}")
+
                 elif text == "/clear_bg":
                     state["target_backgrounds"] = []
-                    await send_tg(session, "✅ Фильтр фонов сброшен. Ищем по всем вариантам.")
+                    await send_tg(session, "✅ Теперь ищем <b>все фоны</b>.")
+    except: pass
 
-    except Exception as e:
-        print(f"❌ Ошибка получения команд: {e}")
-
-# --- ЛОГИКА СКАНЕРА ---
-
-async def fetch_market_data(session, market):
-    """Сбор цен и группировка по Модель+Фон"""
+# --- СКАНЕР ---
+async def fetch_data(session, market):
     url = f"{BASE_URL}/search/{market}/{state['collection']}"
     headers = {"Authorization": f"Token {API_TOKEN}"}
-    
-    market_floors = {}
+    data_map = {}
     try:
         async with session.get(url, headers=headers) as r:
             if r.status == 200:
-                listings = await r.json()
-                for item in listings:
-                    model = item.get("modelName")
-                    bg = item.get("backdropName")
-                    price = float(item.get("normalizedPrice", 0))
+                items = await r.json()
+                for i in items:
+                    m, bg = i.get("modelName"), i.get("backdropName")
+                    # Фильтрация моделей и фонов
+                    if state["target_models"] and m not in state["target_models"]: continue
+                    if state["target_backgrounds"] and bg not in state["target_backgrounds"]: continue
                     
-                    if state["target_backgrounds"] and bg not in state["target_backgrounds"]:
-                        continue
-                    
-                    key = (model, bg)
-                    if key not in market_floors:
-                        market_floors[key] = price
-            elif r.status == 429:
-                print(f"⚠️ Лимит запросов на {market}, ждем...")
-                await asyncio.sleep(5)
-    except Exception as e:
-        print(f"❌ Ошибка парсинга {market}: {e}")
-    
-    return market_floors
+                    key = (m, bg)
+                    if key not in data_map: data_map[key] = float(i.get("normalizedPrice", 0))
+            elif r.status == 429: await asyncio.sleep(5)
+    except: pass
+    return data_map
 
-async def scanner_loop():
-    """Основной бесконечный цикл арбитража"""
+async def main_loop():
     async with aiohttp.ClientSession() as session:
         await start_web_server()
-        print("🚀 Сканнер запущен...")
-
         while True:
-            # Проверка команд в начале каждого круга
             await check_commands(session)
-
-            print(f"[{time.strftime('%X')}] Сканирую рынок...")
             
-            # Запросы к 3 маркетам с задержками
-            tg_data = await fetch_market_data(session, "tg")
+            # Сбор данных
+            tg = await fetch_data(session, "tg")
             await asyncio.sleep(3)
-            mrkt_data = await fetch_market_data(session, "mrkt")
+            mrkt = await fetch_data(session, "mrkt")
             await asyncio.sleep(3)
-            portals_data = await fetch_market_data(session, "portals")
+            portals = await fetch_data(session, "portals")
 
-            all_keys = set(tg_data.keys()) | set(mrkt_data.keys()) | set(portals_data.keys())
-
+            all_keys = set(tg.keys()) | set(mrkt.keys()) | set(portals.keys())
             for key in all_keys:
-                model, bg = key
-                prices = {
-                    "Telegram Market": tg_data.get(key, float('inf')),
-                    "MRKT": mrkt_data.get(key, float('inf')),
-                    "Portals": portals_data.get(key, float('inf'))
-                }
-                
-                valid = {m: p for m, p in prices.items() if p != float('inf')}
+                prices = {"TG": tg.get(key, 999999), "MRKT": mrkt.get(key, 999999), "Portals": portals.get(key, 999999)}
+                valid = {m: p for m, p in prices.items() if p < 999999}
                 if len(valid) < 2: continue
 
-                best_buy_market = min(valid, key=valid.get)
-                buy_price = valid[best_buy_market]
-                
-                other_prices = [p for m, p in valid.items() if m != best_buy_market]
-                best_sell_price = min(other_prices)
+                buy_m = min(valid, key=valid.get)
+                buy_p = valid[buy_m]
+                sell_p = min([p for m, p in valid.items() if m != buy_m])
 
-                if buy_price <= best_sell_price * (1 - state["min_spread"]):
-                    profit_pct = ((best_sell_price - buy_price) / buy_price) * 100
-                    
-                    msg = (f"🔥 <b>АРБИТРАЖ! (+{profit_pct:.1f}%)</b>\n"
-                           f"🎁 <b>{model}</b>\n"
-                           f"🖼 Фон: {bg}\n\n"
-                           f"🛒 КУПИТЬ: <b>{best_buy_market}</b> — {buy_price} TON\n"
-                           f"💰 Продать за: {best_sell_price} TON\n\n"
-                           f"📊 Цены: TG: {prices['Telegram Market']} | MRKT: {prices['MRKT']} | Portals: {prices['Portals']}")
-                    
+                if buy_p <= sell_p * (1 - state["min_spread"]):
+                    profit = ((sell_p - buy_p) / buy_p) * 100
+                    msg = (f"🔥 <b>ПРОФИТ {profit:.1f}%</b>\n"
+                           f"📦 {state['collection']} | {key[0]} | {key[1]}\n"
+                           f"🛒 БУРЕМ: {buy_m} ({buy_p} TON)\n"
+                           f"💰 СЛИВАЕМ: {sell_p} TON")
                     await send_tg(session, msg)
 
             await asyncio.sleep(15)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(scanner_loop())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-        
+    asyncio.run(main_loop())
+                
