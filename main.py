@@ -13,6 +13,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 state = {
     "collections": ["Plush Pepe", "Dog"], 
     "min_spread": float(os.environ.get("MIN_SPREAD_PCT", 0.05)), 
+    "density_pct": 0.05, # Порог плотности стакана (5%)
     "last_update_id": 0,
     "alerts": {}  # Вечный антиспам-кэш
 }
@@ -21,7 +22,7 @@ BASE_URL = "https://gift-satellite.dev/api"
 
 # --- 1. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check) ---
 async def handle_ping(request):
-    return web.Response(text="Arbitrage Bot is active and quiet")
+    return web.Response(text="Arbitrage Bot is active")
 
 async def start_web_server():
     app = web.Application()
@@ -62,12 +63,13 @@ async def check_commands(session):
                     resp = (f"🚀 <b>Сканнер арбитража активен</b>\n\n"
                             f"📦 <b>Коллекции:</b> {', '.join(state['collections'])}\n"
                             f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n"
-                            f"🛡 <b>Антиспам:</b> Вечный замок (сигнал только при падении цены)\n\n"
+                            f"🧱 <b>Порог плотности:</b> {state['density_pct']*100}%\n\n"
                             f"🛠 <b>Команды:</b>\n"
-                            f"• <code>/status</code> — Показать этот статус\n"
+                            f"• <code>/status</code> — Статус и настройки\n"
                             f"• <code>/add_coll Название</code> — Добавить коллекцию\n"
                             f"• <code>/del_coll Название</code> — Удалить коллекцию\n"
-                            f"• <code>/set_spread 5</code> — Изменить минимальный спред (в %)")
+                            f"• <code>/set_spread 5</code> — Изменить спред (в %)\n"
+                            f"• <code>/set_density 3</code> — Изменить порог плотности (в %)")
                     await send_tg(session, resp)
 
                 elif text.startswith("/add_coll"):
@@ -88,14 +90,22 @@ async def check_commands(session):
                         state["min_spread"] = val / 100
                         await send_tg(session, f"✅ Спред изменен на <b>{val}%</b>")
                     except: pass
+
+                elif text.startswith("/set_density"):
+                    try:
+                        val = float(text.split()[1])
+                        state["density_pct"] = val / 100
+                        await send_tg(session, f"✅ Порог плотности изменен на <b>{val}%</b>")
+                    except: pass
+                    
     except Exception as e:
         print(f"⚠️ Ошибка проверки команд: {e}")
 
 # --- 3. СКАНЕР МОДЕЛЕЙ ---
-async def fetch_models_floor(session, market, coll):
+async def fetch_models_prices(session, market, coll):
     url = f"{BASE_URL}/search/{market}/{coll}?limit=1000"
     headers = {"Authorization": f"Token {API_TOKEN}"}
-    model_floors = {}
+    model_prices = {}
     
     try:
         async with session.get(url, headers=headers, timeout=15) as r:
@@ -113,15 +123,17 @@ async def fetch_models_floor(session, market, coll):
                     
                     if raw_model and price > 0:
                         model = str(raw_model).strip()
-                        if model not in model_floors or price < model_floors[model]:
-                            model_floors[model] = price
+                        if model not in model_prices:
+                            model_prices[model] = []
+                        model_prices[model].append(price)
+                
+                for m in model_prices:
+                    model_prices[m].sort()
             else:
                 print(f"❌ {market} вернул {r.status} для '{coll}'")
-                
     except Exception as e:
         print(f"❌ Ошибка запроса к {market}: {e}")
-        
-    return model_floors
+    return model_prices
 
 async def command_listener(session):
     print("🤖 Слушатель команд запущен")
@@ -139,50 +151,51 @@ async def scanner_loop(session):
         for coll in state["collections"]:
             print(f"🔄 Срез по {coll}...")
             
-            tg_f = await fetch_models_floor(session, "tg", coll)
+            tg_p = await fetch_models_prices(session, "tg", coll)
             await asyncio.sleep(4.5) 
-            
-            mrkt_f = await fetch_models_floor(session, "mrkt", coll)
+            mrkt_p = await fetch_models_prices(session, "mrkt", coll)
             await asyncio.sleep(3.5) 
-            
-            port_f = await fetch_models_floor(session, "portals", coll)
+            port_p = await fetch_models_prices(session, "portals", coll)
             await asyncio.sleep(3.5) 
 
-            all_models = set(tg_f.keys()) | set(mrkt_f.keys()) | set(port_f.keys())
+            all_models = set(tg_p.keys()) | set(mrkt_p.keys()) | set(port_p.keys())
 
             for model in all_models:
-                prices = {
-                    "TG": tg_f.get(model, 999999),
-                    "MRKT": mrkt_f.get(model, 999999),
-                    "Portals": port_f.get(model, 999999)
+                prices_dict = {
+                    "TG": tg_p.get(model, []),
+                    "MRKT": mrkt_p.get(model, []),
+                    "Portals": port_p.get(model, [])
                 }
                 
-                valid = {m: p for m, p in prices.items() if p < 999999}
-                
-                # ЖЕСТКИЙ ФИЛЬТР ЛИКВИДНОСТИ: Наличие на всех 3 рынках
-                if len(valid) < 3: 
-                    continue
+                valid_markets = {m: p_list for m, p_list in prices_dict.items() if len(p_list) > 0}
+                if len(valid_markets) < 3: continue
 
-                best_buy_m = min(valid, key=valid.get)
-                buy_p = valid[best_buy_m]
+                floors = {m: p_list[0] for m, p_list in valid_markets.items()}
+                best_buy_m = min(floors, key=floors.get)
+                buy_p = floors[best_buy_m]
                 
-                others = {m: p for m, p in valid.items() if m != best_buy_m}
+                # --- ДИНАМИЧЕСКИЙ ФИЛЬТР ПЛОТНОСТИ СТАКАНА ---
+                buy_market_prices = valid_markets[best_buy_m]
+                if len(buy_market_prices) > 1:
+                    price1 = buy_market_prices[0]
+                    price2 = buy_market_prices[1]
+                    
+                    # Используем state["density_pct"] вместо жестких 5%
+                    if price2 <= price1 * (1 + state["density_pct"]):
+                        continue 
+                # ---------------------------------------------
+
+                others = {m: p for m, p in floors.items() if m != best_buy_m}
                 best_sell_m = min(others, key=others.get)
                 best_sell_p = others[best_sell_m] 
 
                 if buy_p <= best_sell_p * (1 - state["min_spread"]):
-                    
-                    # ======= ВЕЧНЫЙ АНТИСПАМ =======
                     alert_key = f"{coll}_{model}"
                     if alert_key in state["alerts"]:
-                        last_alert = state["alerts"][alert_key]
-                        # Пропускаем, если цена НЕ стала ниже (выгоднее)
-                        if buy_p >= last_alert["buy_price"]:
+                        if buy_p >= state["alerts"][alert_key]["buy_price"]:
                             continue 
-                    # ===============================
 
                     profit = ((best_sell_p - buy_p) / buy_p) * 100
-                    
                     sell_info = [f"{m}: {p} TON" for m, p in others.items()]
                     sell_text = " | ".join(sell_info)
 
@@ -192,9 +205,6 @@ async def scanner_loop(session):
                            f"💰 ПРОДАТЬ: {sell_text}")
                     
                     await send_tg(session, msg)
-                    print(f"💸 Сигнал по {model} отправлен!")
-                    
-                    # Обновляем кэш последней отправленной цены
                     state["alerts"][alert_key] = {"buy_price": buy_p}
 
         print("💤 Круг завершен, ждем 15 сек...")
@@ -213,3 +223,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+        
