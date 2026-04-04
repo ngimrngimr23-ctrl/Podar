@@ -1,7 +1,6 @@
 import asyncio
 import aiohttp
 import os
-import time
 from aiohttp import web
 
 # ================= НАСТРОЙКИ (Environment Variables) =================
@@ -38,7 +37,8 @@ async def send_tg(session, text):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         async with session.post(url, json=payload) as r: return await r.json()
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Ошибка отправки в TG: {e}")
 
 async def check_commands(session):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -91,20 +91,58 @@ async def fetch_models_floor(session, market, coll):
     url = f"{BASE_URL}/search/{market}/{coll}"
     headers = {"Authorization": f"Token {API_TOKEN}"}
     model_floors = {}
+    
+    print(f"🔎 Сканируем {market} для коллекции {coll}...")
+    
     try:
         async with session.get(url, headers=headers) as r:
             if r.status == 200:
-                items = await r.json()
+                response_data = await r.json()
+                
+                # Универсальная обработка ответа от API
+                items = response_data
+                if isinstance(response_data, dict):
+                    items = response_data.get("data") or response_data.get("items") or response_data.get("result", [])
+                
+                # Защита от непредвиденного формата
+                if not isinstance(items, list):
+                    print(f"⚠️ Формат ответа от {market} не распознан. Вот что прислал сервер:\n{response_data}")
+                    return {}
+
+                # Если список пустой - просто выходим
+                if len(items) == 0:
+                    print(f"ℹ️ {market}: По коллекции {coll} пришел пустой список.")
+                    return {}
+
+                # Парсинг данных
                 for i in items:
+                    if not isinstance(i, dict): continue
+                    
                     model = i.get("modelName")
-                    price = float(i.get("normalizedPrice", 0))
-                    # Нам нужна только самая низкая цена на эту модель
-                    if model not in model_floors or price < model_floors[model]:
-                        model_floors[model] = price
+                    try:
+                        price = float(i.get("normalizedPrice", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    
+                    if model and price > 0:
+                        if model not in model_floors or price < model_floors[model]:
+                            model_floors[model] = price
+                            
+                print(f"✅ {market}: Найдено {len(model_floors)} уникальных моделей для {coll}.")
+                            
+            elif r.status == 404:
+                print(f"❌ Ошибка 404: Ссылка {url} не существует. Проверь API_URL!")
+            elif r.status == 401 or r.status == 403:
+                print(f"❌ Ошибка {r.status}: Проблемы с токеном авторизации для {market}.")
             elif r.status == 429:
+                print(f"⚠️ Rate limit на {market}, слишком много запросов. Пауза 5 сек...")
                 await asyncio.sleep(5)
+            else:
+                print(f"❌ Неизвестная ошибка API {market}: статус {r.status}")
+                
     except Exception as e:
-        print(f"Ошибка {market} ({coll}): {e}")
+        print(f"❌ Сетевая ошибка при запросе к {market}: {e}")
+        
     return model_floors
 
 async def run_scanner():
@@ -116,16 +154,16 @@ async def run_scanner():
             await check_commands(session)
             
             for coll in state["collections"]:
-                # Собираем Floor-цены по моделям
+                print(f"\n--- 🔄 Начинаем срез по коллекции {coll} ---")
+                
                 tg_floors = await fetch_models_floor(session, "tg", coll)
-                await asyncio.sleep(2) # Пауза для лимитов
+                await asyncio.sleep(2) 
                 
                 mrkt_floors = await fetch_models_floor(session, "mrkt", coll)
                 await asyncio.sleep(2)
                 
                 portals_floors = await fetch_models_floor(session, "portals", coll)
 
-                # Объединяем все уникальные модели из трех рынков
                 all_models = set(tg_floors.keys()) | set(mrkt_floors.keys()) | set(portals_floors.keys())
 
                 for model in all_models:
@@ -135,15 +173,13 @@ async def run_scanner():
                         "Portals": portals_floors.get(model, 999999)
                     }
                     
-                    # Фильтруем рынки, где эта модель вообще есть
                     valid_prices = {m: p for m, p in prices.items() if p < 999999}
                     if len(valid_prices) < 2: continue
 
-                    # Ищем самую дешевую покупку
                     best_buy_market = min(valid_prices, key=valid_prices.get)
                     buy_price = valid_prices[best_buy_market]
                     
-                    # Ищем самую дорогую цену продажи (на остальных рынках)
+                    # Ищем самый низкий флор среди остальных рынков (чтобы гарантированно продать)
                     other_prices = [p for m, p in valid_prices.items() if m != best_buy_market]
                     best_sell_price = min(other_prices)
 
@@ -157,14 +193,15 @@ async def run_scanner():
                                f"💰 ПРОДАТЬ (Floor): {best_sell_price} TON\n\n"
                                f"📊 Срез: TG: {prices['TG Market']} | MRKT: {prices['MRKT']} | Portals: {prices['Portals']}")
                         await send_tg(session, msg)
+                        print(f"💸 Найдена связка! {model} в коллекции {coll}. Профит: {profit_pct:.1f}%")
 
-                await asyncio.sleep(3) # Пауза между коллекциями
+                await asyncio.sleep(3) 
 
-            await asyncio.sleep(10) # Пауза между кругами сканирования
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     try:
         asyncio.run(run_scanner())
     except (KeyboardInterrupt, SystemExit):
-        pass
-        
+        print("\n🛑 Сканнер остановлен.")
+                    
