@@ -9,6 +9,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # Глобальное состояние
+# Важно: если эти названия выдают ошибку 400, поменяй их прямо в ТГ через /del_coll и /add_coll
 state = {
     "collections": ["PlushPepe", "Dogs"], 
     "min_spread": float(os.environ.get("MIN_SPREAD_PCT", 0.05)), 
@@ -63,8 +64,8 @@ async def check_commands(session):
                             f"📦 <b>Текущие коллекции:</b> {', '.join(state['collections'])}\n"
                             f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n\n"
                             f"🛠 <b>Доступные команды:</b>\n"
-                            f"• <code>/status</code> — Показать этот статус и настройки\n"
-                            f"• <code>/add_coll Название</code> — Добавить коллекцию (например: /add_coll Dogs)\n"
+                            f"• <code>/status</code> — Показать этот статус\n"
+                            f"• <code>/add_coll Название</code> — Добавить коллекцию (напр: /add_coll Plush Pepe)\n"
                             f"• <code>/del_coll Название</code> — Удалить коллекцию\n"
                             f"• <code>/set_spread 5</code> — Изменить минимальный спред (в %)")
                     await send_tg(session, resp)
@@ -101,7 +102,7 @@ async def fetch_models_floor(session, market, coll):
             if r.status == 200:
                 raw_data = await r.json()
                 
-                # Гибкий парсинг (если данные вложены в 'data' или 'items')
+                # Гибкий парсинг
                 items = raw_data
                 if isinstance(raw_data, dict):
                     items = raw_data.get("data") or raw_data.get("items") or raw_data.get("result") or []
@@ -110,19 +111,25 @@ async def fetch_models_floor(session, market, coll):
                     print(f"⚠️ Неверный формат от {market}: {raw_data}")
                     return {}
 
+                # Если список пустой
+                if len(items) == 0:
+                    print(f"ℹ️ {market}: По коллекции '{coll}' пришел пустой список.")
+                    return {}
+
                 for i in items:
                     model = i.get("modelName")
                     price = float(i.get("normalizedPrice", 0))
                     if model and price > 0:
                         if model not in model_floors or price < model_floors[model]:
                             model_floors[model] = price
+                
+                print(f"✅ {market}: Собраны цены по коллекции '{coll}'.")
                             
             elif r.status == 429:
-                print(f"⚠️ {market} выдал 429 (Rate Limit). Ждем паузу.")
+                print(f"⚠️ {market} выдал 429 (Rate Limit). Нужно увеличить паузы.")
             else:
-                # Читаем точный текст ошибки, почему сервер ругается
                 error_text = await r.text()
-                print(f"❌ {market} вернул статус {r.status} для коллекции {coll}. Причина: {error_text}")
+                print(f"❌ {market} вернул {r.status} для '{coll}'. Причина: {error_text}")
                 
     except Exception as e:
         print(f"❌ Ошибка запроса к {market}: {e}")
@@ -140,16 +147,23 @@ async def scanner_loop(session):
     """Отдельный цикл для долгого сканирования рынков"""
     print("🔎 Сканнер рынков запущен")
     while True:
-        for coll in state["collections"]:
-            print(f"🔄 Срез по {coll}...")
+        if not state["collections"]:
+            print("⚠️ Список коллекций пуст. Добавьте коллекцию через ТГ!")
+            await asyncio.sleep(10)
+            continue
             
-            tasks = [
-                fetch_models_floor(session, "tg", coll),
-                fetch_models_floor(session, "mrkt", coll),
-                fetch_models_floor(session, "portals", coll)
-            ]
-            results = await asyncio.gather(*tasks)
-            tg_f, mrkt_f, port_f = results
+        for coll in state["collections"]:
+            print(f"\n🔄 Начинаем срез по {coll}...")
+            
+            # ЗАПРАШИВАЕМ СТРОГО ПО ОЧЕРЕДИ С ПАУЗАМИ
+            tg_f = await fetch_models_floor(session, "tg", coll)
+            await asyncio.sleep(3.5) # TG требует 1 запрос в 3 секунды
+            
+            mrkt_f = await fetch_models_floor(session, "mrkt", coll)
+            await asyncio.sleep(2.5) # Mrkt требует 1 запрос в 2 секунды
+            
+            port_f = await fetch_models_floor(session, "portals", coll)
+            await asyncio.sleep(2.5) # Portals требует 1 запрос в 2 секунды
 
             all_models = set(tg_f.keys()) | set(mrkt_f.keys()) | set(port_f.keys())
 
@@ -163,13 +177,15 @@ async def scanner_loop(session):
                 valid = {m: p for m, p in prices.items() if p < 999999}
                 if len(valid) < 2: continue
 
+                # Ищем самую низкую цену покупки
                 best_buy_m = min(valid, key=valid.get)
                 buy_p = valid[best_buy_m]
                 
-                # Берем минимальный флор среди остальных
+                # Ищем самую низкую цену (флор) на ОСТАЛЬНЫХ рынках
                 others = [p for m, p in valid.items() if m != best_buy_m]
                 best_sell_p = min(others) 
 
+                # Проверяем спред
                 if buy_p <= best_sell_p * (1 - state["min_spread"]):
                     profit = ((best_sell_p - buy_p) / buy_p) * 100
                     msg = (f"⚡️ <b>АРБИТРАЖ {profit:.1f}%</b>\n"
@@ -178,17 +194,15 @@ async def scanner_loop(session):
                            f"💰 ПРОДАТЬ: {best_sell_p} TON\n\n"
                            f"📊 Срез: TG:{prices['TG']} | MRKT:{prices['MRKT']} | Port:{prices['Portals']}")
                     await send_tg(session, msg)
+                    print(f"💸 Найдена связка! {model}. Профит: {profit:.1f}%")
 
-            # Пауза 3.5 секунды, чтобы обойти жесткий лимит маркета TG (1 запрос в 3 секунды)
-            await asyncio.sleep(3.5) 
-        
         print("💤 Круг завершен, ждем 15 сек...")
         await asyncio.sleep(15)
 
 async def main():
     await start_web_server()
     async with aiohttp.ClientSession() as session:
-        # Запускаем две задачи ПАРАЛЛЕЛЬНО
+        # Запускаем две задачи ПАРАЛЛЕЛЬНО (команды и парсер)
         await asyncio.gather(
             command_listener(session),
             scanner_loop(session)
@@ -199,4 +213,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-                    
+            
