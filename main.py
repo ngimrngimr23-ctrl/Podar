@@ -15,6 +15,7 @@ state = {
     "last_update_id": 0
 }
 
+# Актуальный и рабочий базовый URL
 BASE_URL = "https://gift-satellite.dev/api"
 
 # --- 1. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check) ---
@@ -39,7 +40,7 @@ async def send_tg(session, text):
         async with session.post(url, json=payload) as r: 
             return await r.json()
     except Exception as e:
-        print(f"⚠️ Ошибка TG: {e}")
+        print(f"⚠️ Ошибка отправки в TG: {e}")
 
 async def check_commands(session):
     """Проверка входящих команд из Telegram"""
@@ -57,17 +58,34 @@ async def check_commands(session):
 
                 if uid != TELEGRAM_CHAT_ID: continue
 
-                if text == "/start" or text == "/status":
-                    resp = (f"🚀 <b>Сканнер активен</b>\n\n"
-                            f"📦 <b>Коллекции:</b> {', '.join(state['collections'])}\n"
-                            f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n")
+                if text == "/start" or text == "/help" or text == "/status":
+                    resp = (f"🚀 <b>Сканнер арбитража активен</b>\n\n"
+                            f"📦 <b>Текущие коллекции:</b> {', '.join(state['collections'])}\n"
+                            f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n\n"
+                            f"🛠 <b>Доступные команды:</b>\n"
+                            f"• <code>/status</code> — Показать этот статус и настройки\n"
+                            f"• <code>/add_coll Название</code> — Добавить коллекцию (например: /add_coll Dogs)\n"
+                            f"• <code>/del_coll Название</code> — Удалить коллекцию\n"
+                            f"• <code>/set_spread 5</code> — Изменить минимальный спред (в %)")
                     await send_tg(session, resp)
+
+                elif text.startswith("/add_coll"):
+                    name = text.replace("/add_coll", "").strip()
+                    if name and name not in state["collections"]:
+                        state["collections"].append(name)
+                        await send_tg(session, f"✅ Добавлена коллекция: <b>{name}</b>\nТеперь сканируем: {', '.join(state['collections'])}")
+
+                elif text.startswith("/del_coll"):
+                    name = text.replace("/del_coll", "").strip()
+                    if name in state["collections"]:
+                        state["collections"].remove(name)
+                        await send_tg(session, f"❌ Удалена коллекция: <b>{name}</b>\nОстались: {', '.join(state['collections'])}")
 
                 elif text.startswith("/set_spread"):
                     try:
                         val = float(text.split()[1])
                         state["min_spread"] = val / 100
-                        await send_tg(session, f"✅ Спред: <b>{val}%</b>")
+                        await send_tg(session, f"✅ Минимальный спред успешно изменен на <b>{val}%</b>")
                     except: pass
     except Exception as e:
         print(f"⚠️ Ошибка проверки команд: {e}")
@@ -98,10 +116,17 @@ async def fetch_models_floor(session, market, coll):
                     if model and price > 0:
                         if model not in model_floors or price < model_floors[model]:
                             model_floors[model] = price
+                            
+            elif r.status == 429:
+                print(f"⚠️ {market} выдал 429 (Rate Limit). Ждем паузу.")
             else:
-                print(f"❌ {market} вернул статус {r.status}")
+                # Читаем точный текст ошибки, почему сервер ругается
+                error_text = await r.text()
+                print(f"❌ {market} вернул статус {r.status} для коллекции {coll}. Причина: {error_text}")
+                
     except Exception as e:
         print(f"❌ Ошибка запроса к {market}: {e}")
+        
     return model_floors
 
 async def command_listener(session):
@@ -118,7 +143,6 @@ async def scanner_loop(session):
         for coll in state["collections"]:
             print(f"🔄 Срез по {coll}...")
             
-            # Собираем данные
             tasks = [
                 fetch_models_floor(session, "tg", coll),
                 fetch_models_floor(session, "mrkt", coll),
@@ -142,7 +166,7 @@ async def scanner_loop(session):
                 best_buy_m = min(valid, key=valid.get)
                 buy_p = valid[best_buy_m]
                 
-                # Твоя логика: берем минимальный флор среди остальных
+                # Берем минимальный флор среди остальных
                 others = [p for m, p in valid.items() if m != best_buy_m]
                 best_sell_p = min(others) 
 
@@ -155,7 +179,8 @@ async def scanner_loop(session):
                            f"📊 Срез: TG:{prices['TG']} | MRKT:{prices['MRKT']} | Port:{prices['Portals']}")
                     await send_tg(session, msg)
 
-            await asyncio.sleep(2) # Пауза между коллекциями
+            # Пауза 3.5 секунды, чтобы обойти жесткий лимит маркета TG (1 запрос в 3 секунды)
+            await asyncio.sleep(3.5) 
         
         print("💤 Круг завершен, ждем 15 сек...")
         await asyncio.sleep(15)
@@ -174,3 +199,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+                    
