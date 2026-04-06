@@ -39,8 +39,13 @@ ALL_COLLECTIONS = [
 state = {
     "collections": ALL_COLLECTIONS, 
     "ignored_models": [], 
-    "min_spread": float(os.environ.get("MIN_SPREAD_PCT", 0.05)), 
+    "spread_norm_cheap": 0.05,     # Обычный: Дешевые
+    "spread_norm_exp": 0.03,       # Обычный: Дорогие
+    "spread_floor_cheap": 0.05,    # Флор: Дешевые
+    "spread_floor_exp": 0.03,      # Флор: Дорогие
+    "expensive_threshold": 100.0,  # Порог (в TON)
     "density_pct": 0.05,
+    "price_drop_sensitivity": 0.10,
     "last_update_id": 0,
     "alerts": {}
 }
@@ -54,7 +59,10 @@ def load_state():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                for key in ["collections", "ignored_models", "min_spread", "density_pct", "last_update_id", "alerts"]:
+                keys = ["collections", "ignored_models", "spread_norm_cheap", "spread_norm_exp", 
+                        "spread_floor_cheap", "spread_floor_exp", "expensive_threshold", 
+                        "density_pct", "price_drop_sensitivity", "last_update_id", "alerts"]
+                for key in keys:
                     if key in saved:
                         state[key] = saved[key]
             print("💾 Настройки загружены.")
@@ -105,15 +113,23 @@ async def check_commands(session):
                 if text == "/start" or text == "/status":
                     resp = (f"🚀 <b>Сканнер активен</b>\n\n"
                             f"📦 <b>Коллекций:</b> {len(state['collections'])}\n"
-                            f"🚫 <b>В игноре:</b> {len(state['ignored_models'])} моделей\n"
-                            f"📈 <b>Мин. спред:</b> {state['min_spread']*100}%\n"
-                            f"🧱 <b>Плотность:</b> {state['density_pct']*100}%\n\n"
-                            f"🛠 <b>Команды:</b>\n"
-                            f"• <code>/add_all_market</code> — Добавить всё\n"
-                            f"• <code>/ignore Имя Модели</code> — В ЧС\n"
-                            f"• <code>/unignore Имя Модели</code> — Из ЧС\n"
-                            f"• <code>/set_spread 5</code> — Спред (%)\n"
-                            f"• <code>/set_density 3</code> — Плотность (%)")
+                            f"🚫 <b>В игноре:</b> {len(state['ignored_models'])} моделей\n\n"
+                            f"⚙️ <b>НАСТРОЙКИ СПРЕДА:</b>\n"
+                            f"🔸 Обычный (Дешёвые): <b>{state['spread_norm_cheap']*100}%</b>\n"
+                            f"🔸 Обычный (Дорогие): <b>{state['spread_norm_exp']*100}%</b>\n"
+                            f"🔹 Флор (Дешёвые): <b>{state['spread_floor_cheap']*100}%</b>\n"
+                            f"🔹 Флор (Дорогие): <b>{state['spread_floor_exp']*100}%</b>\n"
+                            f"💸 Порог дорогих: <b>{state['expensive_threshold']} TON</b>\n\n"
+                            f"🛡 <b>ФИЛЬТРЫ:</b>\n"
+                            f"🧱 Плотность стакана: <b>{state['density_pct']*100}%</b>\n"
+                            f"🔇 Спам-порог падения цены: <b>{state['price_drop_sensitivity']*100}%</b>\n\n"
+                            f"🛠 <b>КОМАНДЫ (указывать в %):</b>\n"
+                            f"• <code>/set_norm_cheap 5</code>\n"
+                            f"• <code>/set_norm_exp 3</code>\n"
+                            f"• <code>/set_floor_cheap 5</code>\n"
+                            f"• <code>/set_floor_exp 3</code>\n"
+                            f"• <code>/set_exp_thr 100</code> (в TON)\n"
+                            f"• <code>/set_sens 10</code> | <code>/set_density 5</code>")
                     await send_tg(session, resp)
 
                 elif text == "/add_all_market":
@@ -136,18 +152,47 @@ async def check_commands(session):
                         save_state()
                         await send_tg(session, f"✅ Возвращено: <b>{name}</b>")
 
-                elif text.startswith("/set_spread"):
+                elif text.startswith("/set_norm_cheap"):
                     try:
-                        state["min_spread"] = float(text.split()[1]) / 100
+                        state["spread_norm_cheap"] = float(text.split()[1]) / 100
                         save_state()
-                        await send_tg(session, f"✅ Спред: {float(text.split()[1])}%")
+                        await send_tg(session, f"✅ Обычный (Дешёвые): {float(text.split()[1])}%")
                     except: pass
-
+                elif text.startswith("/set_norm_exp"):
+                    try:
+                        state["spread_norm_exp"] = float(text.split()[1]) / 100
+                        save_state()
+                        await send_tg(session, f"✅ Обычный (Дорогие): {float(text.split()[1])}%")
+                    except: pass
+                elif text.startswith("/set_floor_cheap"):
+                    try:
+                        state["spread_floor_cheap"] = float(text.split()[1]) / 100
+                        save_state()
+                        await send_tg(session, f"✅ Флор (Дешёвые): {float(text.split()[1])}%")
+                    except: pass
+                elif text.startswith("/set_floor_exp"):
+                    try:
+                        state["spread_floor_exp"] = float(text.split()[1]) / 100
+                        save_state()
+                        await send_tg(session, f"✅ Флор (Дорогие): {float(text.split()[1])}%")
+                    except: pass
+                elif text.startswith("/set_exp_thr"):
+                    try:
+                        state["expensive_threshold"] = float(text.split()[1])
+                        save_state()
+                        await send_tg(session, f"✅ Порог цены: {float(text.split()[1])} TON")
+                    except: pass
+                elif text.startswith("/set_sens"):
+                    try:
+                        state["price_drop_sensitivity"] = float(text.split()[1]) / 100
+                        save_state()
+                        await send_tg(session, f"✅ Спам-порог: {float(text.split()[1])}%")
+                    except: pass
                 elif text.startswith("/set_density"):
                     try:
                         state["density_pct"] = float(text.split()[1]) / 100
                         save_state()
-                        await send_tg(session, f"✅ Плотность: {float(text.split()[1])}%")
+                        await send_tg(session, f"✅ Плотность стакана: {float(text.split()[1])}%")
                     except: pass
     except: pass
 
@@ -174,7 +219,6 @@ async def fetch_models_prices(session, market, coll):
     return model_prices
 
 def get_market_floor_items(market_prices_dict):
-    """Превращает словарь {модель: [цены]} в отсортированный список всех подарков (цена, модель)"""
     items = []
     for model, prices in market_prices_dict.items():
         for p in prices:
@@ -203,7 +247,6 @@ async def scanner_loop(session):
             port_p = await fetch_models_prices(session, "portals", coll)
             await asyncio.sleep(3.5) 
 
-            # ВЫРЕЗАЕМ ИГНОР-ЛИСТ ИЗ МАТЕМАТИКИ
             for ignored in state["ignored_models"]:
                 tg_p.pop(ignored, None)
                 mrkt_p.pop(ignored, None)
@@ -213,7 +256,7 @@ async def scanner_loop(session):
             floor_alert_price = None
 
             # ==============================================================
-            # БЛОК 1: АРБИТРАЖ ФЛОРА КОЛЛЕКЦИИ (Самый дешёвый подарок вообще)
+            # БЛОК 1: АРБИТРАЖ ФЛОРА КОЛЛЕКЦИИ 
             # ==============================================================
             tg_all = get_market_floor_items(tg_p)
             mrkt_all = get_market_floor_items(mrkt_p)
@@ -223,8 +266,114 @@ async def scanner_loop(session):
             valid_coll_markets = {m: items for m, items in coll_markets.items() if items}
 
             if len(valid_coll_markets) == 3:
-                # Берем самую низкую цену на каждом маркете (индекс 0, элемент 0 = цена)
                 coll_floors = {m: items[0][0] for m, items in valid_coll_markets.items()}
+                
+                best_buy_m_coll = min(coll_floors, key=coll_floors.get)
+                buy_p_coll = coll_floors[best_buy_m_coll]
+                buy_model_coll = valid_coll_markets[best_buy_m_coll][0][1] 
+
+                buy_market_all_items = valid_coll_markets[best_buy_m_coll]
+                wall_passed = True
+                if len(buy_market_all_items) > 1:
+                    if buy_market_all_items[1][0] <= buy_p_coll * (1 + state["density_pct"]):
+                        wall_passed = False
+
+                if wall_passed:
+                    others_coll = {m: p for m, p in coll_floors.items() if m != best_buy_m_coll}
+                    best_sell_m_coll = min(others_coll, key=others_coll.get)
+                    best_sell_p_coll = others_coll[best_sell_m_coll]
+
+                    # 💎 ВЫБОР ФЛОРНОГО СПРЕДА
+                    target_spread_coll = state["spread_floor_exp"] if buy_p_coll >= state["expensive_threshold"] else state["spread_floor_cheap"]
+
+                    if buy_p_coll <= best_sell_p_coll * (1 - target_spread_coll):
+                        alert_key = f"{coll}_ANY_FLOOR"
+                        send_alert = True
+                        
+                        if alert_key in state["alerts"]:
+                            last_price = state["alerts"][alert_key]["buy_price"]
+                            if buy_p_coll > last_price * (1 - state["price_drop_sensitivity"]):
+                                send_alert = False
+
+                        if send_alert:
+                            profit_coll = ((best_sell_p_coll - buy_p_coll) / buy_p_coll) * 100
+                            sell_text_coll = " | ".join([f"{m}: {p} TON" for m, p in others_coll.items()])
+
+                            msg_coll = (f"🔥 <b>АРБИТРАЖ ФЛОРА {profit_coll:.1f}%</b>\n"
+                                        f"📦 <code>{coll}</code> (Самая дешёвая в коллекции)\n\n"
+                                        f"🛒 КУПИТЬ: <b>{best_buy_m_coll}</b> — {buy_p_coll} TON\n"
+                                        f"   └ Модель: <code>{buy_model_coll}</code>\n"
+                                        f"💰 ПРОДАТЬ: {sell_text_coll}")
+                            
+                            await send_tg(session, msg_coll)
+                            state["alerts"][alert_key] = {"buy_price": buy_p_coll}
+                            save_state()
+                            
+                            floor_alert_model = buy_model_coll
+                            floor_alert_price = buy_p_coll
+
+            # ==============================================================
+            # БЛОК 2: АРБИТРАЖ КОНКРЕТНЫХ МОДЕЛЕЙ
+            # ==============================================================
+            all_models = set(tg_p.keys()) | set(mrkt_p.keys()) | set(port_p.keys())
+
+            for model in all_models:
+                prices_dict = {"TG": tg_p.get(model, []), "MRKT": mrkt_p.get(model, []), "Portals": port_p.get(model, [])}
+                valid_markets = {m: p_list for m, p_list in prices_dict.items() if p_list}
+                
+                if len(valid_markets) < 3: continue
+
+                floors = {m: p_list[0] for m, p_list in valid_markets.items()}
+                best_buy_m = min(floors, key=floors.get)
+                buy_p = floors[best_buy_m]
+                
+                buy_market_prices = valid_markets[best_buy_m]
+                if len(buy_market_prices) > 1:
+                    if buy_market_prices[1] <= buy_market_prices[0] * (1 + state["density_pct"]):
+                        continue 
+
+                others = {m: p for m, p in floors.items() if m != best_buy_m}
+                best_sell_m = min(others, key=others.get)
+                best_sell_p = others[best_sell_m] 
+
+                # 💎 ВЫБОР ОБЫЧНОГО СПРЕДА
+                target_spread = state["spread_norm_exp"] if buy_p >= state["expensive_threshold"] else state["spread_norm_cheap"]
+
+                if buy_p <= best_sell_p * (1 - target_spread):
+                    if model == floor_alert_model and buy_p == floor_alert_price:
+                        continue
+
+                    alert_key = f"{coll}_{model}"
+                    
+                    if alert_key in state["alerts"]:
+                        last_price = state["alerts"][alert_key]["buy_price"]
+                        if buy_p > last_price * (1 - state["price_drop_sensitivity"]):
+                            continue 
+
+                    profit = ((best_sell_p - buy_p) / buy_p) * 100
+                    sell_text = " | ".join([f"{m}: {p} TON" for m, p in others.items()])
+
+                    msg = (f"⚡️ <b>АРБИТРАЖ {profit:.1f}%</b>\n"
+                           f"📦 <code>{coll}</code> | 🎁 <code>{model}</code>\n\n"
+                           f"🛒 КУПИТЬ: <b>{best_buy_m}</b> — {buy_p} TON\n"
+                           f"💰 ПРОДАТЬ: {sell_text}")
+                    
+                    await send_tg(session, msg)
+                    state["alerts"][alert_key] = {"buy_price": buy_p}
+                    save_state()
+
+        print("💤 Круг завершен, ждем 15 сек...")
+        await asyncio.sleep(15)
+
+async def main():
+    load_state() 
+    await start_web_server()
+    async with aiohttp.ClientSession() as session:
+        await asyncio.gather(command_listener(session), scanner_loop(session))
+
+if __name__ == "__main__":
+    try: asyncio.run(main())
+    except: passms[0][0] for m, items in valid_coll_markets.items()}
                 
                 best_buy_m_coll = min(coll_floors, key=coll_floors.get)
                 buy_p_coll = coll_floors[best_buy_m_coll]
