@@ -123,13 +123,16 @@ async def check_commands(session):
                             f"🛡 <b>ФИЛЬТРЫ:</b>\n"
                             f"🧱 Плотность стакана: <b>{state['density_pct']*100}%</b>\n"
                             f"🔇 Спам-порог падения цены: <b>{state['price_drop_sensitivity']*100}%</b>\n\n"
-                            f"🛠 <b>КОМАНДЫ (указывать в %):</b>\n"
-                            f"• <code>/set_norm_cheap 5</code>\n"
-                            f"• <code>/set_norm_exp 3</code>\n"
-                            f"• <code>/set_floor_cheap 5</code>\n"
-                            f"• <code>/set_floor_exp 3</code>\n"
-                            f"• <code>/set_exp_thr 100</code> (в TON)\n"
-                            f"• <code>/set_sens 10</code> | <code>/set_density 5</code>")
+                            f"🛠 <b>ШПАРГАЛКА ПО КОМАНДАМ:</b>\n"
+                            f"• <code>/set_norm_cheap 5</code> — Спред обычных дешёвых (%)\n"
+                            f"• <code>/set_norm_exp 3</code> — Спред обычных дорогих (%)\n"
+                            f"• <code>/set_floor_cheap 5</code> — Спред флора дешёвых (%)\n"
+                            f"• <code>/set_floor_exp 3</code> — Спред флора дорогих (%)\n"
+                            f"• <code>/set_exp_thr 100</code> — Порог дорогой цены (в TON)\n"
+                            f"• <code>/set_sens 10</code> — Чувствительность спама (%)\n"
+                            f"• <code>/set_density 5</code> — Плотность стены (%)\n"
+                            f"• <code>/ignore Имя</code> — Добавить модель в ЧС\n"
+                            f"• <code>/unignore Имя</code> — Убрать модель из ЧС")
                     await send_tg(session, resp)
 
                 elif text == "/add_all_market":
